@@ -1,0 +1,250 @@
+var assert = require('better-assert');
+var async = require('async');
+var bc = require('./src/bitcoin_client');
+var db = require('./src/db');
+var lib = require('./src/lib');
+
+
+var client;
+
+// Mapping of deposit_address -> user_id
+var depositAddresses = {};
+
+var count = process.env.GENERATE_ADDRESSES ? parseInt(process.env.GENERATE_ADDRESSES) : 100; // how many addresses to watch
+
+console.log('Generating ', count, ' addresses');
+
+for (var i = 1; i <= count; ++i) {
+    var address = lib.deriveAddress(i);
+    depositAddresses[address] = i;
+}
+
+console.log('Finished generating addresses', depositAddresses);
+
+startBlockLoop();
+
+function processTransactionIds(txids, callback) {
+
+    bc.getTransactionIdsAddresses(txids, function(err, addressToAmountLists) {
+        if (err) return callback(err);
+
+        assert(txids.length === addressToAmountLists.length);
+
+        var tasks = [];
+
+        addressToAmountLists.forEach(function(addressToAmount, i) {
+
+            var txid = txids[i];
+            assert(txid);
+
+            var usersToAmounts = {};
+	    var usersToVouts = {};
+            Object.keys(addressToAmount).forEach(function(address, Txindex) {
+
+                var userId = depositAddresses[address];
+                if (userId) {
+                    usersToAmounts[userId] = addressToAmount[address];
+		    usersToVouts[userId] = Txindex;
+                }
+            });
+
+
+            if (Object.keys(usersToAmounts).length > 0) {
+                console.log('Transactions: ', txid, ' matches: ', usersToAmounts);
+
+                Object.keys(usersToAmounts).forEach(function(userId) {
+                    tasks.push(function(callback) {
+                        db.addDeposit(userId, txid, usersToAmounts[userId],usersToVouts[userId], callback);
+                    });
+                });
+
+
+            }
+        });
+
+        async.parallelLimit(tasks, 3, callback);
+    });
+}
+
+
+
+// Handling the block...
+
+
+/// block chain loop
+
+var lastBlockCount;
+var lastBlockHash;
+
+function startBlockLoop() {
+    // initialize...
+    db.getLastBlock(function (err, block) {
+        if (err)
+            throw new Error('Unable to get initial last block: ', err);
+
+        lastBlockCount = block.height;
+        lastBlockHash = block.hash;
+
+        console.log('Initialized on block: ', lastBlockCount, ' with hash: ', lastBlockHash);
+
+        blockLoop();
+    });
+}
+
+function scheduleBlockLoop() {
+    setTimeout(blockLoop, 20000);
+}
+
+function blockLoop() {
+    bc.getBlockCount(function(err, num) {
+        if (err) {
+            console.error('Unable to get block count');
+            return scheduleBlockLoop();
+        }
+
+        if (num === lastBlockCount) {
+            console.log('Block chain still ', num, ' length. No need to do anything');
+            return scheduleBlockLoop();
+        }
+
+        bc.getBlockHash(lastBlockCount, function(err, hash) {
+            if (err) {
+                console.error('Could not get block hash, error: ' + err);
+                return scheduleBlockLoop();
+            }
+
+            if (lastBlockHash !== hash) {
+                // There was a block-chain reshuffle. So let's just jump back a block
+                db.getBlock(lastBlockCount - 1, function(err, block) {
+                    if (err) {
+                        console.error('ERROR: Unable jump back ', err);
+                        return scheduleBlockLoop();
+                    }
+
+                    --lastBlockCount;
+                    lastBlockHash = block.hash;
+                    blockLoop();
+                });
+                return;
+            }
+
+            bc.getBlockHash(lastBlockCount+1, function(err, hash) {
+                if (err) {
+                    console.error('Unable to get block hash: ', lastBlockCount+1);
+                    return scheduleBlockLoop();
+                }
+
+                processBlock(hash, function(err) {
+                    if (err) {
+                        console.error('Unable to process block: ', hash, ' because: ', err);
+                        return scheduleBlockLoop();
+                    }
+
+                    ++lastBlockCount;
+                    lastBlockHash = hash;
+
+
+                    db.insertBlock(lastBlockCount, lastBlockHash, function(err) {
+                       if (err)
+                          console.error('Danger, unable to save results in database...');
+
+                        // All good! Loop immediately!
+                        blockLoop();
+                    });
+                });
+            });
+
+        });
+    });
+}
+
+
+
+
+
+function processBlock(hash, callback) {
+    console.log('Processing block: ', hash);
+
+    var start = new Date();
+
+    bc.getBlock(hash, function(err, blockInfo) {
+        if (err) {
+            console.error('Unable to get block info for: ', hash, ' got error: ', err);
+            return callback(err);
+        }
+
+        var transactionsIds = blockInfo.tx;
+
+
+        processTransactionIds(transactionsIds, function(err) {
+            if (err)
+                console.log('Unable to process block (in ',  (new Date() - start ) / 1000, ' seconds)');
+            else
+                console.log('Processed ', transactionsIds.length, ' transactions in ', (new Date() - start ) / 1000, ' seconds');
+
+            callback(err)
+        });
+    });
+
+}
+
+function getUnmoved() {
+    // initialize...
+    db.getUnmoved(function (err, data) {
+        vins = [];
+        pkeys = [];
+        sum = 0;
+        sending = [];
+        for(i in data){
+            sending.push(data[i].id);
+            sum += (data[i].amount / 1e8);
+            vins.push({
+                txid:data[i].bitcoin_deposit_txid,
+                vout:data[i].vout,
+                scriptPubKey:lib.deriveHex(data[i].user_id),
+            });
+            pkeys.push(lib.deriveWIF(data[i].user_id));
+        }
+        console.log(sending);
+        //console.log(sum);
+        //console.log(vins);
+        function sendwithFee(fee){
+            console.log('sending with fee',fee);
+            vout = {"1BNe5o3gjP83eTrhTzB7AE1gef87YnBEyF":sum-fee};
+            bc.createRawTransaction(vins,vout,function (err, rtx) {
+                if (err){
+                    console.log('Unable to create raw Tx: ',err);
+		console.log('vout= ', vout);
+		console.log('vins= ', vins);
+                }
+		else { console.log("Success! vout= ",vout); console.log(vins);}
+			
+                bc.signRawTransaction(rtx,vins,pkeys,function (err, sign) {
+                    if (err){
+                        console.log('Unable to sign raw Tx: ', err);
+                    }
+                    bc.sendRawTransaction(sign.hex,function (err, res) {
+                        if (err){
+                            console.log('Unable to send to network: ', err);
+                            if (fee<0.001) sendwithFee(fee+0.0001);
+                        }else{
+                            console.log('sent: ', res);
+                            db.setMoved(sending,res,function (err, res) {
+                                if (err){
+                                    console.log('Unable to change status: ', err);
+                                }
+                                console.log('changed: ', res);
+                            });
+                        }
+                    });
+                });
+            });
+        }
+        if (sum>0.1)
+            sendwithFee(0.0001);
+        //createrawtransaction
+    });
+}
+getUnmoved();
+setInterval(getUnmoved, 20000);
+

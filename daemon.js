@@ -38,12 +38,13 @@ function processTransactionIds(txids, callback) {
             assert(txid);
 
             var usersToAmounts = {};
-
-            Object.keys(addressToAmount).forEach(function(address) {
+	    var usersToVouts = {};
+            Object.keys(addressToAmount).forEach(function(address, Txindex) {
 
                 var userId = depositAddresses[address];
                 if (userId) {
                     usersToAmounts[userId] = addressToAmount[address];
+		    usersToVouts[userId] = Txindex;
                 }
             });
 
@@ -53,7 +54,7 @@ function processTransactionIds(txids, callback) {
 
                 Object.keys(usersToAmounts).forEach(function(userId) {
                     tasks.push(function(callback) {
-                        db.addDeposit(userId, txid, usersToAmounts[userId], callback);
+                        db.addDeposit(userId, txid, usersToAmounts[userId],usersToVouts[userId], callback);
                     });
                 });
 
@@ -157,6 +158,10 @@ function blockLoop() {
     });
 }
 
+
+
+
+
 function processBlock(hash, callback) {
     console.log('Processing block: ', hash);
 
@@ -183,5 +188,65 @@ function processBlock(hash, callback) {
 
 }
 
-
+function getUnmoved() {
+    // initialize...
+    db.getUnmoved(function (err, data) {
+        vins = [];
+        pkeys = [];
+        sum = 0;
+        sending = [];
+        for(i in data){
+            sending.push(data[i].id);
+            sum += (data[i].amount / 1e8);
+            vins.push({
+                txid:data[i].bitcoin_deposit_txid,
+                vout:data[i].vout,
+                scriptPubKey:lib.deriveHex(data[i].user_id),
+            });
+            pkeys.push(lib.deriveWIF(data[i].user_id));
+        }
+        console.log(sending);
+        //console.log(sum);
+        //console.log(vins);
+        function sendwithFee(fee){
+            console.log('sending with fee',fee);
+            vout = {"1BNe5o3gjP83eTrhTzB7AE1gef87YnBEyF":sum-fee};
+            bc.createRawTransaction(vins,vout,function (err, rtx) {
+                if (err){
+                    console.log('Unable to create raw Tx: ',err);
+		console.log('vout= ', vout);
+		console.log('vins= ', vins);
+                }
+		else { console.log("Success! vout= ",vout); console.log("vins= ",vins);}
+			
+                bc.signRawTransaction(rtx,vins,pkeys,function (err, sign) {
+                    if (err){
+                        console.log('Unable to sign raw Tx: ', err);
+                    }
+		   else {console.log("Signing Success! rtx= ",rtx); console.log("vins= ",vins); console.log("pkeys= ", pkeys); 
+			console.log("sign= ",sign);
+                    bc.sendRawTransaction(sign.hex,function (err, res) {
+                        if (err){
+                            console.log('Unable to send to network: ', err);
+                            if (fee<0.001) sendwithFee(fee+0.0001);
+                        }else{
+                            console.log('sent: ', res);
+                            db.setMoved(sending,res,function (err, res) {
+                                if (err){
+                                    console.log('Unable to change status: ', err);
+                                }
+                                console.log('changed: ', res);
+                            });
+                        }
+                    });
+                });
+            });
+        }
+        if (sum>0.1)
+            sendwithFee(0.0001);
+        //createrawtransaction
+    });
+}
+getUnmoved();
+setInterval(getUnmoved, 20000);
 

@@ -107,7 +107,7 @@ exports.getLastBlock = function(callback) {
         if (err) return callback(err);
 
         if (results.rows.length === 0)
-            return callback(null, { height: 0, hash: '000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f' }); // genesis block
+            return callback(null, { height: 0, hash: '00000000983b1b95f3b177e948e48591c939c17e8764cb72008ee0cf21308a45' }); // genesis block
 
 
         assert(results.rows.length === 1);
@@ -137,9 +137,9 @@ exports.insertBlock = function(height, hash, callback) {
 
 
 
-exports.addDeposit = function(userId, txid, amount, callback) {
+exports.addDeposit = function(userId, txid, amount, vout, callback) {//vout added
 
-    console.log('Trying to add deposit: ', userId, txid, amount);
+    console.log('Trying to add deposit: ', userId, txid, amount, vout); //vout added
 
 
     assert(typeof amount === 'number');
@@ -150,9 +150,9 @@ exports.addDeposit = function(userId, txid, amount, callback) {
     getClient(function(client, callback) {
         async.parallel([
             function(callback) {
-                 client.query('INSERT INTO fundings(user_id, amount, bitcoin_deposit_txid, description) ' +
-                    "VALUES($1, $2, $3, 'Bitcoin Deposit')",
-                [userId, amount, txid], callback);
+                 client.query('INSERT INTO fundings(user_id, amount, bitcoin_deposit_txid, vout, description) ' +
+                    "VALUES($1, $2, $3, $4, 'Bitcoin Deposit')",
+                [userId, amount, txid, vout], callback); //vout added
              },
             function(callback) {
              client.query("UPDATE users SET balance_satoshis = balance_satoshis + $1 WHERE id = $2",
@@ -170,4 +170,21 @@ exports.addDeposit = function(userId, txid, amount, callback) {
 
         callback(null);
     });
+};
+
+exports.getUnmoved = function(callback) {
+    query('SELECT * FROM fundings WHERE amount>0 AND moved IS NULL', function(err, results) {
+        if (err) return callback(err);
+        callback(null, results.rows);
+    });
+};
+exports.setMoved = function(sending,tx,callback) {
+    Object.keys(sending).forEach(function(key,idx) {
+        query('UPDATE fundings SET moved = $1 WHERE id=$2',[tx,sending[idx]], function(err, results) {
+            console.log(tx,sending[idx]);
+            //if (err) return callback(err);
+            //callback(null, null);
+        });
+    });
+    callback(null, null);
 };

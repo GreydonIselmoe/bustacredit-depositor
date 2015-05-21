@@ -86,10 +86,16 @@ exports.chunkSlow = chunkSlow;
 var derivedPubKey = process.env.BIP32_DERIVED_KEY;
 if (!derivedPubKey)
     throw new Error('Must set env var BIP32_DERIVED_KEY');
-
-var hdNode = bitcoinjs.HDNode.fromBase58(derivedPubKey);
-
+ 
+var hdNode = bitcoinjs.HDNode.fromBase58(derivedPubKey,bitcoinjs.networks.credits);
+ 
 exports.deriveAddress = function(index) {
-    return hdNode.derive(index).pubKey.getAddress().toString();
+    return hdNode.derive(index).pubKey.getAddress(bitcoinjs.networks.credits).toString();
 };
-
+exports.deriveWIF = function(index) {
+    return hdNode.derive(index).privKey.toWIF(bitcoinjs.networks.credits).toString();
+};
+exports.deriveHex = function(index) {
+        w =(new bitcoinjs.Address(bitcoinjs.crypto.hash160(hdNode.derive(index).pubKey.toBuffer(bitcoinjs.networks.credits)), bitcoinjs.networks.credits.pubKeyHash)).toOutputScript().buffer.toString('hex');
+    return w;
+};
